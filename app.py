@@ -35,6 +35,7 @@ def get_qdrant_retriever(url: str = "http://localhost:6333", collection_name: st
         collection_name=collection_name, # <== Penentuan COLLECTION
         embeddings=embedding,
     )
+    print(f"Connect Ke Qdrant {url}")
     retriever = qdrant.as_retriever(search_kwargs={"k" : k})
     print(f"success retriever qdrant {collection_name}")
     return retriever
@@ -148,7 +149,7 @@ for msg in st.session_state.chat_history:
 if prompt := st.chat_input("Ketik pesan disini..."):
     st.session_state.chat_history.append(HumanMessage(content=prompt))
     docs = retriever.invoke(prompt)
-    context = "\n\n".join([d.page_content for d in docs]) if docs else ""
+    context = "\n\n".join([d.page_content for d in docs]) if docs else "Saya tidak tahu"
 
 
     #response manusia

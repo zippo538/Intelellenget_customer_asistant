@@ -1,13 +1,16 @@
 import streamlit as st 
 from langchain_community.embeddings import SentenceTransformerEmbeddings
-from langchain.chains import create_history_aware_retriever, create_retrieval_chain
-from langchain.chains.combine_documents import create_stuff_documents_chain
+from langchain_core.runnables import RunnablePassthrough
+from langchain_core.output_parsers import StrOutputParser
+from langchain_classic.chains import create_history_aware_retriever, create_retrieval_chain
+from langchain_classic.chains.combine_documents import create_stuff_documents_chain
 from langchain_core.prompts import MessagesPlaceholder
 from langchain_core.prompts.chat import ChatPromptTemplate
-from qdrant_client import QdrantClient
 from langchain_community.vectorstores import Qdrant
 from langchain_groq import ChatGroq
 from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.runnables import RunnableLambda, RunnableBranch, RunnablePassthrough
+from qdrant_client import QdrantClient
 import os
 from dotenv import load_dotenv
 
@@ -23,7 +26,7 @@ def local_css(file_name):
         st.markdown(f"<style>{css}</style>",unsafe_allow_html=True)
 
 def get_qdrant_retriever(url: str = "http://localhost:6333", collection_name: str = None, model_name : str = "all-MiniLM-L6-v2", k : int = 4):
-       
+
     embedding = SentenceTransformerEmbeddings(model_name=model_name)
     client = QdrantClient(url=url)
     
@@ -33,6 +36,7 @@ def get_qdrant_retriever(url: str = "http://localhost:6333", collection_name: st
         embeddings=embedding,
     )
     retriever = qdrant.as_retriever(search_kwargs={"k" : k})
+    print(f"success retriever qdrant {collection_name}")
     return retriever
 
 
@@ -49,19 +53,19 @@ def load_llm(id_model, temperature):
     return llm
 
 model_llm = load_llm('meta-llama/llama-4-maverick-17b-128e-instruct', 0.3)
-retriever = get_qdrant_retriever("user_manual_BNI_Mbank")
+retriever = get_qdrant_retriever(collection_name="user_manual_BNI_Mbank")
+
+def has_context(inputs) : 
+    context = inputs.get("context","")
+    return bool(context and context.strip())
 
 
+context_q_system_prompt = "Kamu adalah asisten AI yang membantu pengguna menjawab pertanyaan tentang BNI Mobile Banking. \
+    Gunakan konteks dari dokumen (hasil pencarian retriever) dan riwayat percakapan sebelumnya \
+    untuk menjawab dengan akurat, ringkas, dan relevan. \
+    Jika konteks tidak mengandung informasi yang cukup untuk menjawab, katakan dengan sopan 'Maaf, saya tidak tahu.'"
 
-context_q_system_prompt = "Given the following chat history and the follow-up question which might reference \
-    context in the chat history, rephrase the follow-up question to be a standalone question which can be unserstood without the chat history. \
-    Do NOT answer the question, just reformulate it if needed and otherwise return it as is."
-    
-context_q_system_prompt = "Given the following chat history and the follow-up question which might reference \
-    context in the chat history, rephrase the follow-up question to be a standalone question which can be unserstood without the chat history. \
-    Do NOT answer the question, just reformulate it if needed and otherwise return it as is."
-
-context_q_user_prompt = "Question : {input}"
+context_q_user_prompt = "Pertanyaan: {input}\n\n Konteks:\n{context}"
 
 context_q_prompt = ChatPromptTemplate.from_messages([
     ("system",context_q_system_prompt),
@@ -75,26 +79,29 @@ history_aware_retriever = create_history_aware_retriever(
     prompt=context_q_prompt
 )
 
-qa_prompt = ChatPromptTemplate.from_messages([
-    ("system",context_q_system_prompt),
-    MessagesPlaceholder("chat_history"),
-    ("human", "Question: {input}\nContext: {context}\nPlease provide a concise and accurate answer based on the context provided. \
-        If the context does not contain sufficient information to answer the question, respond with \"I don't know.\""), 
-])
 
 qa_chain = create_stuff_documents_chain(
     model_llm,
-    qa_prompt,
+    context_q_prompt,
 )
 
 rag_chain = create_retrieval_chain(
-    history_aware_retriever,
-    qa_chain
+    retriever=retriever,
+    combine_docs_chain =qa_chain
+)
+
+
+no_context_chain = RunnableLambda(lambda x : {"answer" : "Maaf saya tidak tahu"})
+
+final_chain = RunnableBranch(
+    (has_context,rag_chain),
+    RunnablePassthrough() | no_context_chain
+    | StrOutputParser()
 )
 
 
 
-st.set_page_config(page_title="Chat Bot BNI MOBILE BANKING",page_icon="🤖", layout="wide")
+st.set_page_config(page_title="Chat Bot BNI MOBILE BANKING",page_icon="🤖", layout="centered")
 
 st.sidebar.title("BNI MOBILE BANKING CHAT BOT🤖")
 st.sidebar.markdown("### 🧠 Chat Memory")
@@ -102,31 +109,69 @@ st.sidebar.markdown("### 🧠 Chat Memory")
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
 
-st.title("💬 AI Assistant")
+st.title("💬 AI ASSISTANT BNI MOBILE ")
 st.caption("Ask anything — your AI assistant is here to help!")
 
-if st.session_state.chat_history:
-    chat_text = "\n\n".join(
-        [f"HumanMessage: {msg['content']}" if msg["role"] == "HumanMessage" else f"AIMessage: {msg['content']}" for msg in st.session_state.chat_history]
-    )
 
+
+
+def format_chat_history(chat_history):
+    """
+    Ubah list of AIMessage/HumanMessage menjadi string percakapan.
+    """
+    history_str = ""
+    for msg in chat_history:
+        if isinstance(msg, HumanMessage):
+            history_str += f"User: {msg.content}\n"
+        elif isinstance(msg, AIMessage):
+            history_str += f"AI: {msg.content}\n"
+    return history_str.strip()
+
+
+#tampilkan riwayat percakapan
 for msg in st.session_state.chat_history:
-    if msg["role"] == "HumanMessage" : 
-        st.markdown(f"<div class='stChatMessage user'>🧑‍💻: {msg['content']}</div>", unsafe_allow_html=True)
-    else : 
-        st.markdown(f"<div class='stChatMessage bot'>🤖: {msg['content']}</div>", unsafe_allow_html=True)
+    if isinstance(msg, HumanMessage):
+        role = "user"
+        content_str = f"**User:** {msg.content}"
+    elif isinstance(msg, AIMessage):
+        role = "assistant"
+        content_str = f"**AI:** {msg.content}"
+    else:
+        role = "system" 
+        content_str = f"**System:** {msg.content}" if hasattr(msg, 'content') else str(msg)
+         
+    with st.chat_message(role):
+        st.markdown(msg.content)
 
-with st.form("chat_form",clear_on_submit=True):
-    user_input = st.text_input("Type your message", key="input",placeholder="Adakah bisa saya Bantu?")
-    submitted = st.form_submit_button("send")
 
-if submitted and user_input : 
-    st.session_state.chat_history.append(HumanMessage(content=user_input))
+#input pengguna
+if prompt := st.chat_input("Ketik pesan disini..."):
+    st.session_state.chat_history.append(HumanMessage(content=prompt))
+    docs = retriever.invoke(prompt)
+    context = "\n\n".join([d.page_content for d in docs]) if docs else ""
 
-    result = rag_chain.invoke({"input":user_input,"chat_history":st.session_state.chat_history})
-    st.session_state.chat_history.append(AIMessage(content=result["answer"]))
+
+    #response manusia
+    with st.chat_message("user"):
+        st.markdown(prompt)
     
-    st.rerun()
+    #response ai
+    with st.chat_message("assistant"):
+        message_placeholder = st.empty()
+        message_placeholder.markdown("_AI sedang mengetik..._")
+        
+        response = final_chain.invoke({
+            "input":prompt,
+            "chat_history" :st.session_state.chat_history,
+            "context" : context
+            })
+        
+        message_placeholder.markdown(response['answer'])
+        print(response)
+    
+    
+    st.session_state.chat_history.append(AIMessage(content=response['answer']))
+    
     
     
 
